@@ -351,7 +351,8 @@ func scanCreateSubCommand(
 		"",
 		fmt.Sprintf("Parameters to use in SCA resolver (requires --%s).", commonParams.ScaResolverFlag),
 	)
-	createScanCmd.PersistentFlags().String(commonParams.ScanTypes, "", "Scan types, ex: (sast,kics,sca)")
+	createScanCmd.PersistentFlags().String(commonParams.ScanTypes, "", "Scan types, ex: (sast,kics,sca,kics-realtime-container,kics-realtime-api)")
+	createScanCmd.PersistentFlags().String(commonParams.KicsRealtimeFile, "", "Path to kics file for kics realtime scan")
 	createScanCmd.PersistentFlags().String(commonParams.TagList, "", "List of tags, ex: (tagA,tagB:val,etc)")
 	createScanCmd.PersistentFlags().StringP(
 		commonParams.BranchFlag, commonParams.BranchFlagSh,
@@ -546,6 +547,8 @@ func validateScanTypes() {
 		isValid := false
 		if strings.EqualFold(strings.TrimSpace(scanType), "sast") ||
 			strings.EqualFold(strings.TrimSpace(scanType), "kics") ||
+			strings.EqualFold(strings.TrimSpace(scanType), "kics-docker") ||
+			strings.EqualFold(strings.TrimSpace(scanType), "kics-api") ||
 			strings.EqualFold(strings.TrimSpace(scanType), "sca") {
 			isValid = true
 		}
@@ -915,48 +918,156 @@ func runCreateScanCommand(
 	groupsWrapper wrappers.GroupsWrapper,
 ) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
-		branch := viper.GetString(commonParams.BranchKey)
-		if branch == "" {
-			return errors.Errorf("%s: Please provide a branch", failedCreating)
+		determineScanTypes(cmd)
+		if scanTypeEnabled("kics-realtime-container") {
+			return kicsDockerScan(cmd, args)
+		} else if scanTypeEnabled("kics-realtime-api") {
+			return kicsAPIScan(cmd, args)
+		} else {
+			return astScan(scansWrapper, uploadsWrapper, resultsWrapper, projectsWrapper, groupsWrapper, cmd, args)
 		}
-		timeoutMinutes, _ := cmd.Flags().GetInt(commonParams.ScanTimeoutFlag)
-		if timeoutMinutes < 0 {
-			return errors.Errorf("--%s should be equal or higher than 0", commonParams.ScanTimeoutFlag)
-		}
-		scanModel, err := createScanModel(cmd, uploadsWrapper, projectsWrapper, groupsWrapper)
-		if err != nil {
-			return errors.Errorf("%s", err)
-		}
-		scanResponseModel, errorModel, err := scansWrapper.Create(scanModel)
-		if err != nil {
-			return errors.Wrapf(err, "%s", failedCreating)
-		}
-		// Checking the response
-		if errorModel != nil {
-			return errors.Errorf(ErrorCodeFormat, failedCreating, errorModel.Code, errorModel.Message)
-		} else if scanResponseModel != nil {
-			err = printByScanInfoFormat(cmd, toScanView(scanResponseModel))
-			if err != nil {
-				return errors.Wrapf(err, "%s\n", failedCreating)
-			}
-		}
-		// Wait until the scan is done: Queued, Running
-		AsyncFlag, _ := cmd.Flags().GetBool(commonParams.AsyncFlag)
-		if !AsyncFlag {
-			waitDelay, _ := cmd.Flags().GetInt(commonParams.WaitDelayFlag)
-			err := handleWait(cmd, scanResponseModel, waitDelay, timeoutMinutes, scansWrapper, resultsWrapper)
-			if err != nil {
-				return err
-			}
-
-			err = applyThreshold(cmd, resultsWrapper, scanResponseModel)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
 	}
+}
+
+func createKicsScanLoc(cmd *cobra.Command) (string, string, error) {
+	kicsDir, err := ioutil.TempDir("", "kics")
+	if err != nil {
+		return "", "", err
+	}
+	defer os.RemoveAll(kicsDir)
+	kicsFilePath, _ := cmd.Flags().GetString(commonParams.KicsRealtimeFile)
+	if len(kicsFilePath) < 1 {
+		return "", "", errors.New("Kics file required from --kics-realtime-file")
+	}
+	kicsFile, err := ioutil.ReadFile(kicsFilePath)
+	if err != nil {
+		return "", "", err
+	}
+	_, file := filepath.Split(kicsFilePath)
+	destinationFile := fmt.Sprintf("%s/%s", kicsDir, file)
+	err = ioutil.WriteFile(destinationFile, kicsFile, 0666)
+	if err != nil {
+		return "", "", err
+	}
+	volumeMap := fmt.Sprintf("%s:/path", kicsDir)
+	return volumeMap, kicsDir, nil
+}
+
+func kicsCopyReport(cmd *cobra.Command, tempDir string) error {
+	targetFile, _ := cmd.Flags().GetString(commonParams.TargetFlag)
+	targetPath, _ := cmd.Flags().GetString(commonParams.TargetPathFlag)
+	srcFile := fmt.Sprintf("%s/results.json", tempDir)
+	resultFile, err := ioutil.ReadFile(srcFile)
+	if err != nil {
+		return err
+	}
+	destinationFile := fmt.Sprintf("%s/%s.json", targetPath, targetFile)
+	err = ioutil.WriteFile(destinationFile, resultFile, 0666)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Results file: " + destinationFile)
+	return nil
+}
+
+func kicsDockerScan(
+	cmd *cobra.Command,
+	args []string,
+) error {
+	// TODO: SCAN, then retrieve results.json
+	volumeMap, tempDir, err := createKicsScanLoc(cmd)
+	fmt.Println(volumeMap, tempDir)
+	volumeMap = fmt.Sprintf("%s:/path", "/Users/jeffarmstrong/WebGoat/docker")
+	tempDir = "/Users/jeffarmstrong/WebGoat/docker"
+	fmt.Println("FIX OVERIDE volumeMap to: " + volumeMap)
+	if err != nil {
+		return err
+	}
+	kicsArgs := []string{
+		"run",
+		"-v",
+		volumeMap,
+		"checkmarx/kics:latest",
+		"scan",
+		"-p",
+		"/path",
+		"-o",
+		"/path",
+	}
+	fmt.Println("FIX: allow overide between: docker, nerdctl, podman, etc.")
+	kicsCmd := "nerdctl"
+	out, err := exec.Command(kicsCmd, kicsArgs...).CombinedOutput()
+	PrintIfVerbose(string(out))
+	//
+	// NOTE: the kics container returns 40 instead of 0 when successful!! This
+	// definately an incorrect behavior but the following check gets past it.
+	//
+	const errMsg = "exit status 40"
+	if err != nil && errMsg == err.Error() {
+		kicsCopyReport(cmd, tempDir)
+	} else if err != nil {
+		return errors.Errorf("%s", err)
+	}
+	return nil
+}
+
+func kicsAPIScan(
+	cmd *cobra.Command,
+	args []string,
+) error {
+	fmt.Println("TODO: API kics scan")
+	return nil
+}
+
+func astScan(
+	scansWrapper wrappers.ScansWrapper,
+	uploadsWrapper wrappers.UploadsWrapper,
+	resultsWrapper wrappers.ResultsWrapper,
+	projectsWrapper wrappers.ProjectsWrapper,
+	groupsWrapper wrappers.GroupsWrapper,
+	cmd *cobra.Command,
+	args []string,
+) error {
+	branch := viper.GetString(commonParams.BranchKey)
+	if branch == "" {
+		return errors.Errorf("%s: Please provide a branch", failedCreating)
+	}
+	timeoutMinutes, _ := cmd.Flags().GetInt(commonParams.ScanTimeoutFlag)
+	if timeoutMinutes < 0 {
+		return errors.Errorf("--%s should be equal or higher than 0", commonParams.ScanTimeoutFlag)
+	}
+	scanModel, err := createScanModel(cmd, uploadsWrapper, projectsWrapper, groupsWrapper)
+	if err != nil {
+		return errors.Errorf("%s", err)
+	}
+	scanResponseModel, errorModel, err := scansWrapper.Create(scanModel)
+	if err != nil {
+		return errors.Wrapf(err, "%s", failedCreating)
+	}
+	// Checking the response
+	if errorModel != nil {
+		return errors.Errorf(ErrorCodeFormat, failedCreating, errorModel.Code, errorModel.Message)
+	} else if scanResponseModel != nil {
+		err = printByScanInfoFormat(cmd, toScanView(scanResponseModel))
+		if err != nil {
+			return errors.Wrapf(err, "%s\n", failedCreating)
+		}
+	}
+	// Wait until the scan is done: Queued, Running
+	AsyncFlag, _ := cmd.Flags().GetBool(commonParams.AsyncFlag)
+	if !AsyncFlag {
+		waitDelay, _ := cmd.Flags().GetInt(commonParams.WaitDelayFlag)
+		err := handleWait(cmd, scanResponseModel, waitDelay, timeoutMinutes, scansWrapper, resultsWrapper)
+		if err != nil {
+			return err
+		}
+
+		err = applyThreshold(cmd, resultsWrapper, scanResponseModel)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func createScanModel(
@@ -965,7 +1076,6 @@ func createScanModel(
 	projectsWrapper wrappers.ProjectsWrapper,
 	groupsWrapper wrappers.GroupsWrapper,
 ) (*wrappers.Scan, error) {
-	determineScanTypes(cmd)
 	validateScanTypes()
 	sourceDirFilter, _ := cmd.Flags().GetString(commonParams.SourceDirFilterFlag)
 	userIncludeFilter, _ := cmd.Flags().GetString(commonParams.IncludeFilterFlag)

@@ -72,6 +72,7 @@ const (
 	TargetFormatFlag         = "report-format"
 	ProjectName              = "project-name"
 	ScanTypes                = "scan-types"
+	KicsRealtimeFile         = "kics-realtime-file"
 	ScanTypeFlag             = "scan-type"
 	TagList                  = "tags"
 	GroupList                = "groups"
