@@ -886,7 +886,6 @@ func determineSourceType(sourcesFile string) (zipFile, sourceDir, scanRepoURL st
 	if strings.HasPrefix(sourcesFile, "https://") ||
 		strings.HasPrefix(sourcesFile, "http://") {
 		scanRepoURL = sourcesFile
-
 		log.Printf("\n\nScanning branch %s...\n", viper.GetString(commonParams.BranchKey))
 	} else {
 		info, statErr := os.Stat(sourcesFile)
@@ -934,7 +933,6 @@ func createKicsScanLoc(cmd *cobra.Command) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	defer os.RemoveAll(kicsDir)
 	kicsFilePath, _ := cmd.Flags().GetString(commonParams.KicsRealtimeFile)
 	if len(kicsFilePath) < 1 {
 		return "", "", errors.New("Kics file required from --kics-realtime-file")
@@ -954,14 +952,23 @@ func createKicsScanLoc(cmd *cobra.Command) (string, string, error) {
 }
 
 func kicsCopyReport(cmd *cobra.Command, tempDir string) error {
+	fmt.Println("STARTING COPY")
 	targetFile, _ := cmd.Flags().GetString(commonParams.TargetFlag)
 	targetPath, _ := cmd.Flags().GetString(commonParams.TargetPathFlag)
 	srcFile := fmt.Sprintf("%s/results.json", tempDir)
 	resultFile, err := ioutil.ReadFile(srcFile)
 	if err != nil {
+		fmt.Println(err)
+		fmt.Println("ERR")
 		return err
 	}
+	// HACK, FIX
+	//fmt.Println("Trying to copy file")
+	//targetFile = "results"
+	//targetPath = "/Users/jeffarmstrong/WebGoat/docker"
+
 	destinationFile := fmt.Sprintf("%s/%s.json", targetPath, targetFile)
+	fmt.Println("Copying report to: " + destinationFile)
 	err = ioutil.WriteFile(destinationFile, resultFile, 0666)
 	if err != nil {
 		return err
@@ -974,17 +981,15 @@ func kicsDockerScan(
 	cmd *cobra.Command,
 	args []string,
 ) error {
-	// TODO: SCAN, then retrieve results.json
 	volumeMap, tempDir, err := createKicsScanLoc(cmd)
-	fmt.Println(volumeMap, tempDir)
-	volumeMap = fmt.Sprintf("%s:/path", "/Users/jeffarmstrong/WebGoat/docker")
-	tempDir = "/Users/jeffarmstrong/WebGoat/docker"
-	fmt.Println("FIX OVERIDE volumeMap to: " + volumeMap)
+	defer os.RemoveAll(tempDir)
+	fmt.Println("TempDirs: ", volumeMap, tempDir)
 	if err != nil {
 		return err
 	}
 	kicsArgs := []string{
 		"run",
+		"--rm",
 		"-v",
 		volumeMap,
 		"checkmarx/kics:latest",
@@ -994,13 +999,27 @@ func kicsDockerScan(
 		"-o",
 		"/path",
 	}
+	fmt.Println(kicsArgs)
+	/*
+		kicsArgs = []string{
+			"run",
+			"-v",
+			volumeMap,
+			"checkmarx/kics:latest",
+			"version",
+		}
+	*/
 	fmt.Println("FIX: allow overide between: docker, nerdctl, podman, etc.")
-	kicsCmd := "nerdctl"
+	//kicsCmd := "nerdctl"
+	kicsCmd := "docker"
+	//out, err := exec.Command(kicsCmd, kicsArgs...).Output()
 	out, err := exec.Command(kicsCmd, kicsArgs...).CombinedOutput()
 	PrintIfVerbose(string(out))
 	//
 	// NOTE: the kics container returns 40 instead of 0 when successful!! This
-	// definately an incorrect behavior but the following check gets past it.
+	// is likey an incorrect behavior and it causes Go to think kics has failed,
+	// the following if/else switch consumes the error to create expected
+	// behavior.
 	//
 	const errMsg = "exit status 40"
 	if err != nil && errMsg == err.Error() {
